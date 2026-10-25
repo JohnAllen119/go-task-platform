@@ -136,3 +136,57 @@ func TestFindByIDNotFound(t *testing.T) {
 	}
 
 }
+func TestCreateTaskSuccess(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	payload := json.RawMessage(`{"to":"test@example.com"}`)
+	id, err := CreateTask(ctx, db, "email", payload)
+	if err != nil {
+		t.Fatalf("create task failed:%v", err)
+	}
+	t.Cleanup(func() {
+		_, err := db.ExecContext(ctx, `
+		DELETE FROM tasks
+		WHERE id=?
+		`, id)
+		if err != nil {
+			t.Fatalf("cleanup failed:%v", err)
+		}
+	})
+	if id <= 0 {
+		t.Fatalf("id<=0:%d", id)
+	}
+	task, err := FindByID(ctx, db, id)
+	if err != nil {
+		t.Fatalf("findbyid failed:%v", err)
+	}
+	if task.TaskType != "email" || task.Status != "pending" {
+		t.Fatalf("expect tasktype=email,get:%s,expect status=pending,get:%s", task.TaskType, task.Status)
+	}
+}
+
+func TestCreateTaskInvalidPayload(t *testing.T) {
+	db := openTestDB(t)
+	payload := json.RawMessage(`{"to":`)
+	ctx := context.Background()
+	id, err := CreateTask(ctx, db, "email", payload)
+	if id != 0 {
+		t.Cleanup(func() {
+			_, err := db.ExecContext(ctx, `
+			DELETE FROM tasks
+			WHERE id=?
+			`, id)
+			if err != nil {
+				t.Fatalf("delete tasks failed,:%v", err)
+			}
+		})
+	}
+	if err == nil {
+		t.Fatalf("expected error for invalid JSON, got nil")
+	}
+	if id != 0 {
+
+		t.Fatalf("create invalid task got id:%d", id)
+	}
+
+}

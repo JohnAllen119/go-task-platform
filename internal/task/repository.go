@@ -3,6 +3,8 @@ package task
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -27,4 +29,27 @@ func FindByID(ctx context.Context, db *sql.DB, id uint64) (Task, error) {
 		return Task{}, err
 	}
 	return task, nil
+}
+func CreateTask(
+	ctx context.Context,
+	db *sql.DB,
+	taskType string,
+	payload json.RawMessage,
+) (uint64, error) {
+	result, err := db.ExecContext(ctx, `
+	INSERT INTO tasks(task_type,payload)
+	VALUES(?,?)
+	`, taskType, payload)
+	if err != nil {
+		return 0, err
+	}
+
+	newID, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if newID <= 0 {
+		return 0, fmt.Errorf("newID<=0,get:%d", newID)
+	}
+	return uint64(newID), nil
 }
