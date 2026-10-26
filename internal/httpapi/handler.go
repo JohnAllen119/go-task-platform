@@ -1,0 +1,57 @@
+package httpapi
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"github.com/JohnAllen119/go-task-platform/internal/task"
+	"net/http"
+	"strconv"
+)
+
+type ErrorResponse struct {
+	Error string `json:"error"`
+}
+type TaskResponse struct {
+	ID       uint64 `json:"id"`
+	TaskType string `json:"task_type"`
+	Status   string `json:"status"`
+}
+
+func NewHandler(db *sql.DB) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+		taskByIDHandler(db, w, r)
+	})
+	return mux
+}
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(ErrorResponse{Error: message})
+}
+func taskByIDHandler(db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	rawID := r.PathValue("id")
+	id, err := strconv.ParseUint(rawID, 10, 64)
+	if id <= 0 || err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	ctx := r.Context()
+	foundtask, err := task.FindByID(ctx, db, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeJSONError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	var taskResponse TaskResponse
+	taskResponse.ID = foundtask.ID
+	taskResponse.TaskType = foundtask.TaskType
+	taskResponse.Status = foundtask.Status
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(&taskResponse)
+}
