@@ -17,11 +17,21 @@ type TaskResponse struct {
 	TaskType string `json:"task_type"`
 	Status   string `json:"status"`
 }
+type CreateTaskRequest struct {
+	TaskType string          `json:"task_type"`
+	Payload  json.RawMessage `json:"payload"`
+}
+type CreateTaskResponse struct {
+	ID uint64 `json:"id"`
+}
 
 func NewHandler(db *sql.DB) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
 		taskByIDHandler(db, w, r)
+	})
+	mux.HandleFunc("POST /tasks", func(w http.ResponseWriter, r *http.Request) {
+		CreateTaskHandler(db, w, r)
 	})
 	return mux
 }
@@ -54,4 +64,32 @@ func taskByIDHandler(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(&taskResponse)
+}
+func CreateTaskHandler(db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	var taskRequest CreateTaskRequest
+	err := json.NewDecoder(r.Body).Decode(&taskRequest)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "decode failed")
+		return
+	}
+	if taskRequest.TaskType == "" {
+		writeJSONError(w, http.StatusBadRequest, "invalid TaskType")
+		return
+	}
+	if taskRequest.Payload == nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid Payload")
+		return
+	}
+	ctx := r.Context()
+	newID, err := task.CreateTask(ctx, db, taskRequest.TaskType, taskRequest.Payload)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "create task failed")
+		return
+	}
+	var taskResponse CreateTaskResponse
+	taskResponse.ID = newID
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(taskResponse)
+
 }
