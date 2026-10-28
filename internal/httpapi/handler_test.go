@@ -10,8 +10,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
-	"testing"
 	"time"
+	"testing"
 )
 
 func openHTTPTestDB(t *testing.T) *sql.DB {
@@ -193,17 +193,17 @@ func TestCreateTaskSuccess(t *testing.T) {
 		) =?;
 		`, marker)
 		if err != nil {
-			t.Errorf("delete failed:%v", err)
+    t.Errorf("delete failed:%v", err)
+	return
+}
+	ra,err:=result.RowsAffected()
+		if err!=nil{
+			t.Errorf("get ra failed:%v",err)
 			return
 		}
-		ra, err := result.RowsAffected()
-		if err != nil {
-			t.Errorf("get ra failed:%v", err)
-			return
-		}
-		if ra != 1 {
-			t.Errorf("expect:ra = 1,get:%d", ra)
-			return
+		if ra!=1{
+			t.Errorf("expect:ra = 1,get:%d",ra)
+
 		}
 	})
 	body := fmt.Sprintf(`{
