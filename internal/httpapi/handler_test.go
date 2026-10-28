@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func openHTTPTestDB(t *testing.T) *sql.DB {
@@ -183,10 +184,35 @@ func TestGetTaskDatabaseError(t *testing.T) {
 
 func TestCreateTaskSuccess(t *testing.T) {
 	db := openHTTPTestDB(t)
-	body := `{
-	"task_type": "email",
-	"payload": {"to": "test@example.com"}
-	}`
+	marker := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		result, err := db.Exec(`
+		DELETE FROM tasks
+		WHERE JSON_UNQUOTE(
+				JSON_EXTRACT(payload,'$.test_marker')
+		) =?;
+		`, marker)
+		if err != nil {
+			t.Errorf("delete failed:%v", err)
+			return
+		}
+		ra, err := result.RowsAffected()
+		if err != nil {
+			t.Errorf("get ra failed:%v", err)
+			return
+		}
+		if ra != 1 {
+			t.Errorf("expect:ra = 1,get:%d", ra)
+			return
+		}
+	})
+	body := fmt.Sprintf(`{
+    "task_type": "email",
+    "payload": {
+        "to": "test@example.com",
+        "test_marker": %q
+    }
+}`, marker)
 	request := httptest.NewRequest(http.MethodPost, "/tasks", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
@@ -194,7 +220,6 @@ func TestCreateTaskSuccess(t *testing.T) {
 	mux.ServeHTTP(recorder, request)
 	response := recorder.Result()
 	defer response.Body.Close()
-	t.Logf("Location: %q", response.Header.Get("Location"))
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("expect :201,get:%d", response.StatusCode)
 	}
@@ -206,15 +231,7 @@ func TestCreateTaskSuccess(t *testing.T) {
 	if taskResponse.ID <= 0 {
 		t.Fatalf("id <=0")
 	}
-	t.Cleanup(func() {
-		_, err := db.Exec(`
-		DELETE FROM tasks
-		WHERE id=?
-		`, taskResponse.ID)
-		if err != nil {
-			t.Fatalf("delete failed:%v", err)
-		}
-	})
+
 	var taskType string
 	var status string
 	err = db.QueryRow(`
@@ -333,5 +350,51 @@ func TestCreateTaskDatabaseError(t *testing.T) {
 	}
 	if m["error"] != "create task failed" {
 		t.Fatalf("expect create task failed,get:%s", m["error"])
+	}
+}
+func TestCreateTaskNullPayload(t *testing.T) {
+	body := `{
+	"task_type" : "email",
+	"payload" : null
+	}`
+	request := httptest.NewRequest(http.MethodPost, "/tasks", strings.NewReader(body))
+	recorder := httptest.NewRecorder()
+	mux := NewHandler(nil)
+	mux.ServeHTTP(recorder, request)
+	response := recorder.Result()
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expect:400,get:%d", response.StatusCode)
+	}
+	m := make(map[string]string)
+	err := json.NewDecoder(response.Body).Decode(&m)
+	if err != nil {
+		t.Fatalf("decode response body failed:%v", err)
+	}
+	if m["error"] != "invalid Payload" {
+		t.Fatalf("expect:invalid Payload,get:%s", m["error"])
+	}
+}
+func TestCreateTaskWhitespaceTaskType(t *testing.T) {
+	body := `{
+	"task_type":" ",
+	"payload":{"message":"hello"}
+	}`
+	request := httptest.NewRequest(http.MethodPost, "/tasks", strings.NewReader(body))
+	recorder := httptest.NewRecorder()
+	mux := NewHandler(nil)
+	mux.ServeHTTP(recorder, request)
+	response := recorder.Result()
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expect:400,get:%d", response.StatusCode)
+	}
+	m := make(map[string]string)
+	err := json.NewDecoder(response.Body).Decode(&m)
+	if err != nil {
+		t.Fatalf("decode failed:%v", err)
+	}
+	if m["error"] != "invalid TaskType" {
+		t.Fatalf("expect:invalid TaskTyp,get:%s", m["error"])
 	}
 }

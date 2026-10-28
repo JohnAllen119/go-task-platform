@@ -7,6 +7,7 @@ import (
 	"github.com/JohnAllen119/go-task-platform/internal/task"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 type ErrorResponse struct {
@@ -72,11 +73,16 @@ func CreateTaskHandler(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "decode failed")
 		return
 	}
+	taskRequest.TaskType = strings.TrimSpace(taskRequest.TaskType)
+	if taskRequest.Payload == nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid Payload")
+		return
+	}
 	if taskRequest.TaskType == "" {
 		writeJSONError(w, http.StatusBadRequest, "invalid TaskType")
 		return
 	}
-	if taskRequest.Payload == nil {
+	if string(taskRequest.Payload) == "null" {
 		writeJSONError(w, http.StatusBadRequest, "invalid Payload")
 		return
 	}
