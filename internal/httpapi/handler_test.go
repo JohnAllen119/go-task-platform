@@ -10,8 +10,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
-	"time"
 	"testing"
+	"time"
 )
 
 func openHTTPTestDB(t *testing.T) *sql.DB {
@@ -193,16 +193,16 @@ func TestCreateTaskSuccess(t *testing.T) {
 		) =?;
 		`, marker)
 		if err != nil {
-    t.Errorf("delete failed:%v", err)
-	return
-}
-	ra,err:=result.RowsAffected()
-		if err!=nil{
-			t.Errorf("get ra failed:%v",err)
+			t.Errorf("delete failed:%v", err)
 			return
 		}
-		if ra!=1{
-			t.Errorf("expect:ra = 1,get:%d",ra)
+		ra, err := result.RowsAffected()
+		if err != nil {
+			t.Errorf("get ra failed:%v", err)
+			return
+		}
+		if ra != 1 {
+			t.Errorf("expect:ra = 1,get:%d", ra)
 
 		}
 	})
@@ -234,11 +234,12 @@ func TestCreateTaskSuccess(t *testing.T) {
 
 	var taskType string
 	var status string
+	var tmarker string
 	err = db.QueryRow(`
-	SELECT task_type,status
+	SELECT task_type,status,JSON_UNQUOTE(JSON_EXTRACT(payload,'$.test_marker'))
 	FROM tasks
 	WHERE id=?
-	`, taskResponse.ID).Scan(&taskType, &status)
+	`, taskResponse.ID).Scan(&taskType, &status, &tmarker)
 	if err != nil {
 		t.Fatalf("query failed:%v", err)
 	}
@@ -247,6 +248,9 @@ func TestCreateTaskSuccess(t *testing.T) {
 	}
 	if status != "pending" {
 		t.Fatalf("expect:pending,get:%s", status)
+	}
+	if tmarker != marker {
+		t.Fatalf("expect:%s,get:%s", marker, tmarker)
 	}
 }
 
