@@ -7,9 +7,15 @@ import (
 	"errors"
 	_ "github.com/go-sql-driver/mysql"
 	"os"
+	"sync"
 	"testing"
 	"time"
 )
+
+type startResult struct {
+	started bool
+	err     error
+}
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -187,6 +193,189 @@ func TestCreateTaskInvalidPayload(t *testing.T) {
 	if id != 0 {
 
 		t.Fatalf("create invalid task got id:%d", id)
+	}
+
+}
+func TestTryStartTaskSuccess(t *testing.T) {
+	db := openTestDB(t)
+	taskType := "email"
+	payload := `{"to":"test@exmaple.com"}`
+
+	result, err := db.Exec(`
+	INSERT INTO tasks(task_type,payload)
+	VALUES(?,?)
+	`, taskType, payload)
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	lid, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get id failed:%v", err)
+	}
+	t.Cleanup(func() {
+		_, err := db.Exec(`
+		DELETE FROM tasks
+		WHERE id=?
+		`, lid)
+		if err != nil {
+			t.Fatalf("cleanup failed:%v", err)
+		}
+	})
+	ctx := context.Background()
+	est, err := TryStartTask(ctx, db, uint64(lid))
+
+	if err != nil {
+		t.Fatalf("trystartedtask failed")
+	}
+	if est != true {
+		t.Fatalf("start failed")
+	}
+	var sta string
+	var started bool
+	err = db.QueryRow(`
+	SELECT status,started_at IS NOT NULL
+	FROM tasks
+	WHERE id=?
+	`, lid).Scan(&sta, &started)
+	if err != nil {
+		t.Fatalf("select failed:%v", err)
+	}
+	if sta != "running" {
+		t.Fatalf("expect:running,get:%s", sta)
+	}
+	if !started {
+		t.Fatal("started_at is NULL")
+	}
+
+}
+func TestTryStartTaskAlreadyRunning(t *testing.T) {
+	db := openTestDB(t)
+	taskType := "email"
+	payload := `{"to":"test@example.com"}`
+	result, err := db.Exec(`
+	INSERT INTO tasks(task_type,payload)
+	VALUES(?,?)
+	`, taskType, payload)
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	ra, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get lastinsertid failed:%v", err)
+	}
+	if ra <= 0 {
+		t.Fatalf("ra<=0")
+	}
+	t.Cleanup(func() {
+		_, err := db.Exec(`
+		DELETE FROM tasks
+		WHERE id=?
+		`, ra)
+		if err != nil {
+			t.Fatalf("clean up failed:%v", err)
+		}
+	})
+	ctx := context.Background()
+	tst, err := TryStartTask(ctx, db, uint64(ra))
+	if err != nil {
+		t.Fatalf("trystarttask failed:%v", err)
+	}
+	if !tst {
+		t.Fatalf("start task filed")
+	}
+	tst, err = TryStartTask(ctx, db, uint64(ra))
+	if err != nil {
+		t.Fatalf("trystarttask failed:%v", err)
+	}
+	if tst {
+		t.Fatalf("start task shouldn't succeed")
+	}
+	var sta string
+	err = db.QueryRow(`
+	SELECT status
+	FROM tasks
+	WHERE id=?
+	`, ra).Scan(&sta)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if sta != "running" {
+		t.Fatalf("expect sta=running,get:%s", sta)
+	}
+
+}
+func TestTryStartTaskConcurrent(t *testing.T) {
+	db := openTestDB(t)
+	taskType := "email"
+	payload := `{"to":"test@example.com"}`
+	ctx := context.Background()
+	result, err := db.Exec(`
+	INSERT INTO tasks(task_type,payload)
+	VALUES(?,?)
+	`, taskType, payload)
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	ra, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get lastinsertid failed:%v", err)
+	}
+	if ra <= 0 {
+		t.Fatalf("ra<=0")
+	}
+	t.Cleanup(func() {
+		_, err := db.Exec(`
+		DELETE FROM tasks
+		WHERE id=?
+		`, ra)
+		if err != nil {
+			t.Fatalf("clean up failed:%v", err)
+		}
+	})
+	success := 0
+	failed := 0
+	var wg sync.WaitGroup
+	wg.Add(10)
+
+	ch := make(chan startResult, 10)
+
+	for i := 0; i < 10; i++ {
+		go func() {
+			defer wg.Done()
+
+			est, err := TryStartTask(ctx, db, uint64(ra))
+			ch <- startResult{started: est, err: err}
+		}()
+	}
+
+	wg.Wait()
+	close(ch)
+
+	for v := range ch {
+		if v.err != nil {
+			t.Fatalf("TryStartTask failed: %v", v.err)
+		}
+
+		if v.started {
+			success++
+		} else {
+			failed++
+		}
+	}
+	if success != 1 && failed != 9 {
+		t.Fatalf("success!=1,failed!=9")
+	}
+	var sta string
+	err = db.QueryRow(`
+	SELECT status
+	FROM tasks
+	WHERE id=?
+	`, ra).Scan(&sta)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if sta != "running" {
+		t.Fatalf("expect sta:running,get:%s", sta)
 	}
 
 }

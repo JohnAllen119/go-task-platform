@@ -53,3 +53,24 @@ func CreateTask(
 	}
 	return uint64(newID), nil
 }
+func TryStartTask(ctx context.Context, db *sql.DB, id uint64) (bool, error) {
+	result, err := db.ExecContext(ctx, `
+	UPDATE tasks
+	SET status='running',started_at=CURRENT_TIMESTAMP
+	WHERE id=? AND status='pending'
+	`, id)
+	if err != nil {
+		return false, err
+	}
+	ra, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if ra > 1 {
+		return false, fmt.Errorf("ra>1")
+	}
+	if ra == 0 {
+		return false, nil
+	}
+	return true, nil
+}
