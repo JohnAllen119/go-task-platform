@@ -19,13 +19,26 @@ func runWorker(
 	ids <-chan uint64,
 	results chan<- Result,
 ) {
-	for id := range ids {
-		var result Result
-		res, err := task.TryStartTask(ctx, db, id)
-		result.TaskID = id
-		result.Started = res
-		result.Err = err
-		results <- result
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case id, ok := <-ids:
+			if !ok {
+				return
+			}
+			var result Result
+			res, err := task.TryStartTask(ctx, db, id)
+			result.TaskID = id
+			result.Started = res
+			result.Err = err
+			select {
+			case <-ctx.Done():
+				return
+			case results <- result:
+			}
+
+		}
 	}
 }
 func RunPool(

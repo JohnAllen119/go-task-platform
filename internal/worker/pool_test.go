@@ -120,3 +120,83 @@ func TestRunPoolEmptyInput(t *testing.T) {
 	}
 
 }
+func TestRunPoolCancelWithoutClosingInput(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ids := make(chan uint64)
+	results := RunPool(ctx, nil, ids, 3)
+	cancel()
+	select {
+	case _, ok := <-results:
+		if ok {
+			t.Fatalf("get results failed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker pool did not stop")
+	}
+}
+
+func TestRunPoolCancelWhileSending(t *testing.T) {
+	db := openWorkerTestDB(t)
+
+	result, err := db.Exec(`
+    INSERT INTO tasks(task_type, payload)
+    VALUES(?, ?)
+`, "email", `{"to":"test@example.com"}`)
+
+	if err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get id failed: %v", err)
+	}
+
+	taskID := uint64(id)
+	t.Cleanup(func() {
+		_, err := db.Exec("DELETE FROM tasks WHERE id=?", taskID)
+		if err != nil {
+			t.Errorf("cleanup failed: %v", err)
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ids := make(chan uint64, 1)
+	ids <- taskID
+
+	results := RunPool(ctx, db, ids, 1)
+
+	var status string
+	deadline := time.Now().Add(time.Second)
+
+	for {
+		err = db.QueryRowContext(ctx, `
+        SELECT status FROM tasks WHERE id = ?
+    `, taskID).Scan(&status)
+
+		if err != nil {
+			t.Fatalf("query failed: %v", err)
+		}
+
+		if status == "running" {
+			break
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatal("task was not claimed within 1 second")
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case _, ok := <-results:
+		if ok {
+			t.Fatalf("get results failed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker pool did not stop")
+	}
+
+}
