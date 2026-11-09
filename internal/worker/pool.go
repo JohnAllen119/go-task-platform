@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"github.com/JohnAllen119/go-task-platform/internal/task"
 	"sync"
 )
@@ -29,9 +31,43 @@ func runWorker(
 			}
 			var result Result
 			res, err := task.TryStartTask(ctx, db, id)
-			result.TaskID = id
-			result.Started = res
-			result.Err = err
+			if err == nil && res {
+				t, founderr := task.FindByID(ctx, db, id)
+				if founderr != nil {
+					err = founderr
+				} else {
+					execErr := Execute(ctx, t.TaskType, t.Payload)
+					if execErr != nil {
+						err = execErr
+						updated, markErr := task.MarkFailed(ctx, db, id, execErr.Error())
+						if markErr != nil {
+							err = errors.Join(execErr, markErr)
+						} else if !updated {
+							err = errors.Join(
+								execErr,
+								fmt.Errorf("task %d: status update failed", id),
+							)
+						}
+
+					} else {
+						updated, markErr := task.MarkSucceeded(ctx, db, id)
+
+						if markErr != nil {
+							err = fmt.Errorf("mark succeeded failed: %w", markErr)
+						} else if !updated {
+							err = fmt.Errorf("task %d: status update failed", id)
+						}
+
+					}
+				}
+
+			}
+
+			result = Result{
+				TaskID:  id,
+				Started: res,
+				Err:     err,
+			}
 			select {
 			case <-ctx.Done():
 				return

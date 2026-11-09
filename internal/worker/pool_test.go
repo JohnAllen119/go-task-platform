@@ -178,7 +178,7 @@ func TestRunPoolCancelWhileSending(t *testing.T) {
 			t.Fatalf("query failed: %v", err)
 		}
 
-		if status == "running" {
+		if status == "succeeded" {
 			break
 		}
 
@@ -199,4 +199,143 @@ func TestRunPoolCancelWhileSending(t *testing.T) {
 		t.Fatal("worker pool did not stop")
 	}
 
+}
+func TestRunPoolExecuteSuccess(t *testing.T) {
+
+	db := openWorkerTestDB(t)
+	insertResult, err := db.Exec(`
+	INSERT INTO tasks(task_type,payload,status)
+	VALUE(?,?,?)
+	`, "email", `{"to":"test@example.com","simulate_failure":false}`, "pending")
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	idd, err := insertResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("get last insert id failed")
+	}
+	if idd <= 0 {
+		t.Fatalf("idd<=0")
+	}
+	t.Cleanup(func() {
+		_, err := db.Exec(`
+		DELETE FROM tasks
+		WHERE id=?
+		`, idd)
+		if err != nil {
+			t.Fatalf("delete failed:%v", err)
+		}
+	})
+	ctx := context.Background()
+	ids := make(chan uint64, 1)
+	taskID := uint64(idd)
+	ids <- taskID
+	close(ids)
+	results := RunPool(ctx, db, ids, 1)
+
+	select {
+	case r, ok := <-results:
+		if !ok {
+			t.Fatal("results closed unexpectedly")
+		}
+		if r.TaskID != taskID {
+			t.Fatalf("expect taskid=%d,get:%d", r.TaskID, taskID)
+		}
+		if !r.Started {
+			t.Fatalf("start failed")
+		}
+		if r.Err != nil {
+			t.Fatalf("run failed:%v", r.Err)
+		}
+
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker timeout")
+	}
+
+	var status string
+	var finishedAt sql.NullTime
+	err = db.QueryRow(`
+	SELECT status,finished_at
+	FROM tasks
+	WHERE id=?
+	`, taskID).Scan(&status, &finishedAt)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if status != "succeeded" {
+		t.Fatalf("expect:succeeded,get:%s", status)
+	}
+	if !finishedAt.Valid {
+		t.Fatalf("finished at invalid")
+	}
+}
+func TestRunPoolExecuteFailure(t *testing.T) {
+	db := openWorkerTestDB(t)
+	insertResult, err := db.Exec(`
+	INSERT INTO tasks(task_type,payload,status)
+	VALUES(?,?,?)
+	`, "email", `{"to":"test@example.com","simulate_failure":true}`, "pending")
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	idd, err := insertResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("get last insert id failed")
+	}
+	if idd <= 0 {
+		t.Fatalf("idd<=0")
+	}
+	t.Cleanup(func() {
+		_, err := db.Exec(`
+		DELETE FROM tasks
+		WHERE id=?
+		`, idd)
+		if err != nil {
+			t.Fatalf("delete failed:%v", err)
+		}
+	})
+	ctx := context.Background()
+
+	ids := make(chan uint64, 1)
+	taskID := uint64(idd)
+	ids <- taskID
+	close(ids)
+	results := RunPool(ctx, db, ids, 1)
+	select {
+	case r, ok := <-results:
+		if !ok {
+			t.Fatal("results closed unexpectedly")
+		}
+		if r.TaskID != taskID {
+			t.Fatalf("expect taskid=%d,get:%d", r.TaskID, taskID)
+		}
+		if !r.Started {
+			t.Fatalf("start failed")
+		}
+		if r.Err == nil {
+			t.Fatalf("run failed:%v", r.Err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker timeout")
+	}
+	var status string
+	var finishedAt sql.NullTime
+	var lastError sql.NullString
+	err = db.QueryRow(`
+	SELECT status,finished_at,last_error
+	FROM tasks
+	WHERE id=?
+	`, taskID).Scan(&status, &finishedAt, &lastError)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if status != "failed" {
+		t.Fatalf("expect status :failed,get : %s", status)
+	}
+	if !finishedAt.Valid {
+		t.Fatalf("finished at invalid")
+	}
+	if !lastError.Valid || lastError.String == "" {
+		t.Fatal("last_error is null or empty")
+	}
 }
