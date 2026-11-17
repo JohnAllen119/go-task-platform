@@ -56,7 +56,7 @@ func CreateTask(
 func TryStartTask(ctx context.Context, db *sql.DB, id uint64) (bool, error) {
 	result, err := db.ExecContext(ctx, `
 	UPDATE tasks
-	SET status='running',started_at=CURRENT_TIMESTAMP
+	SET status='running',started_at=CURRENT_TIMESTAMP,lease_expires_at = NOW(6) + INTERVAL 30 SECOND
 	WHERE id=? AND status='pending'
 	`, id)
 	if err != nil {

@@ -1,0 +1,1 @@
+ALTER TABLE tasks ADD COLUMN lease_expires_at DATETIME(6) NULL;

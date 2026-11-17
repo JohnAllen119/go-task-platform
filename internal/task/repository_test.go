@@ -379,3 +379,96 @@ func TestTryStartTaskConcurrent(t *testing.T) {
 	}
 
 }
+
+func TestTryStartTaskLease(t *testing.T) {
+	db := openTestDB(t)
+	result, err := db.Exec(`
+INSERT INTO tasks(task_type,payload)
+VALUES(?,?)
+`, "email", `{"to":"test@example.com"}`)
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	idd, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get last insert id failed:%v", err)
+	}
+	if idd <= 0 {
+		t.Fatalf("id <=0 ")
+	}
+	t.Cleanup(func() {
+		_, err := db.Exec(`
+	DELETE FROM tasks
+	WHERE id=?
+	`, idd)
+		if err != nil {
+			t.Fatalf("delete failed:%v", err)
+		}
+	})
+	var leaseExpiresAt sql.NullTime
+	err = db.QueryRow(`
+	SELECT lease_expires_at
+	FROM tasks
+	WHERE id=?
+	`, idd).Scan(&leaseExpiresAt)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if leaseExpiresAt.Valid {
+		t.Fatal("pending task should not have a lease")
+	}
+	
+	id := uint64(idd)
+	ctx := context.Background()
+	started, err := TryStartTask(ctx, db, id)
+	if err != nil {
+		t.Fatalf("try start task failed:%v", err)
+	}
+	if !started {
+		t.Fatalf("try start task failed")
+	}
+	
+	err = db.QueryRow(`
+	SELECT lease_expires_at
+	FROM tasks
+	WHERE id=?
+	`, idd).Scan(&leaseExpiresAt)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if !leaseExpiresAt.Valid {
+		t.Fatal("lease_expires_at invalid")
+	}
+	l := leaseExpiresAt
+	started, err = TryStartTask(ctx, db, id)
+	if err != nil {
+		t.Fatalf("try start task failed:%v",err)
+	}
+	if started {
+		t.Fatalf("try start task succeed")
+	}
+	
+	var ti int64
+	err = db.QueryRow(`
+	SELECT lease_expires_at,TIMESTAMPDIFF(
+    MICROSECOND,
+    NOW(6),
+    lease_expires_at
+)
+	FROM tasks
+	WHERE id=?
+	`, idd).Scan(&leaseExpiresAt,&ti)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if !leaseExpiresAt.Valid {
+		t.Fatal("lease_expires_at invalid")
+	}
+	if !l.Time.Equal(leaseExpiresAt.Time) {
+    t.Fatal("lease expiry changed after duplicate claim")
+}	
+	if ti < 25000000 || ti > 30000000 {
+    t.Fatal("lease duration invalid")
+}
+	
+}
