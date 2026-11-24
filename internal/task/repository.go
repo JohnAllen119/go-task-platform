@@ -53,12 +53,42 @@ func CreateTask(
 	}
 	return uint64(newID), nil
 }
-func TryStartTask(ctx context.Context, db *sql.DB, id uint64) (bool, error) {
+func TryStartTask(ctx context.Context, db *sql.DB, id uint64) (string, bool, error) {
+	s, err := generateLeaseToken()
+	if err != nil {
+		return "", false, err
+	}
 	result, err := db.ExecContext(ctx, `
 	UPDATE tasks
-	SET status='running',started_at=CURRENT_TIMESTAMP,lease_expires_at = NOW(6) + INTERVAL 30 SECOND
-	WHERE id=? AND status='pending'
-	`, id)
+	SET status='running',started_at=CURRENT_TIMESTAMP,lease_expires_at = NOW(6) + INTERVAL 30 SECOND,lease_token=?
+	WHERE id=? AND (status='pending' OR (status='running' AND lease_expires_at<=NOW(6)))
+	`, s, id)
+	if err != nil {
+		return "", false, err
+	}
+	ra, err := result.RowsAffected()
+	if err != nil {
+		return "", false, err
+	}
+	if ra > 1 {
+		return "", false, fmt.Errorf("ra>1")
+	}
+	if ra == 0 {
+		return "", false, nil
+	}
+	return s, true, nil
+}
+func RenewLease(
+	ctx context.Context,
+	db *sql.DB,
+	id uint64,
+	leaseToken string,
+) (bool, error) {
+	result, err := db.ExecContext(ctx, `
+	UPDATE tasks
+	SET lease_expires_at=NOW(6)+INTERVAL 30 SECOND
+	WHERE id=? AND status=? AND lease_token=? AND lease_expires_at>NOW(6)
+	`, id, "running", leaseToken)
 	if err != nil {
 		return false, err
 	}
@@ -66,11 +96,11 @@ func TryStartTask(ctx context.Context, db *sql.DB, id uint64) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if ra > 1 {
-		return false, fmt.Errorf("ra>1")
-	}
 	if ra == 0 {
 		return false, nil
+	}
+	if ra > 1 {
+		return false, fmt.Errorf("ra>1")
 	}
 	return true, nil
 }

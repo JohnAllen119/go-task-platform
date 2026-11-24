@@ -222,13 +222,16 @@ func TestTryStartTaskSuccess(t *testing.T) {
 		}
 	})
 	ctx := context.Background()
-	est, err := TryStartTask(ctx, db, uint64(lid))
+	token, est, err := TryStartTask(ctx, db, uint64(lid))
 
 	if err != nil {
 		t.Fatalf("trystartedtask failed")
 	}
 	if est != true {
 		t.Fatalf("start failed")
+	}
+	if token == "" {
+		t.Fatalf("token is empty")
 	}
 	var sta string
 	var started bool
@@ -276,19 +279,25 @@ func TestTryStartTaskAlreadyRunning(t *testing.T) {
 		}
 	})
 	ctx := context.Background()
-	tst, err := TryStartTask(ctx, db, uint64(ra))
+	token, tst, err := TryStartTask(ctx, db, uint64(ra))
 	if err != nil {
 		t.Fatalf("trystarttask failed:%v", err)
 	}
 	if !tst {
 		t.Fatalf("start task filed")
 	}
-	tst, err = TryStartTask(ctx, db, uint64(ra))
+	if token == "" {
+		t.Fatalf("token is empty")
+	}
+	token, tst, err = TryStartTask(ctx, db, uint64(ra))
 	if err != nil {
 		t.Fatalf("trystarttask failed:%v", err)
 	}
 	if tst {
 		t.Fatalf("start task shouldn't succeed")
+	}
+	if token != "" {
+		t.Fatalf("token shoudn't exist")
 	}
 	var sta string
 	err = db.QueryRow(`
@@ -343,7 +352,7 @@ func TestTryStartTaskConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			est, err := TryStartTask(ctx, db, uint64(ra))
+			_, est, err := TryStartTask(ctx, db, uint64(ra))
 			ch <- startResult{started: est, err: err}
 		}()
 	}
@@ -417,17 +426,19 @@ VALUES(?,?)
 	if leaseExpiresAt.Valid {
 		t.Fatal("pending task should not have a lease")
 	}
-	
+
 	id := uint64(idd)
 	ctx := context.Background()
-	started, err := TryStartTask(ctx, db, id)
+	token, started, err := TryStartTask(ctx, db, id)
 	if err != nil {
 		t.Fatalf("try start task failed:%v", err)
 	}
 	if !started {
 		t.Fatalf("try start task failed")
 	}
-	
+	if token == "" {
+		t.Fatalf("token is empty")
+	}
 	err = db.QueryRow(`
 	SELECT lease_expires_at
 	FROM tasks
@@ -440,14 +451,16 @@ VALUES(?,?)
 		t.Fatal("lease_expires_at invalid")
 	}
 	l := leaseExpiresAt
-	started, err = TryStartTask(ctx, db, id)
+	token, started, err = TryStartTask(ctx, db, id)
 	if err != nil {
-		t.Fatalf("try start task failed:%v",err)
+		t.Fatalf("try start task failed:%v", err)
 	}
 	if started {
 		t.Fatalf("try start task succeed")
 	}
-	
+	if token != "" {
+		t.Fatalf("token is not empty")
+	}
 	var ti int64
 	err = db.QueryRow(`
 	SELECT lease_expires_at,TIMESTAMPDIFF(
@@ -457,7 +470,7 @@ VALUES(?,?)
 )
 	FROM tasks
 	WHERE id=?
-	`, idd).Scan(&leaseExpiresAt,&ti)
+	`, idd).Scan(&leaseExpiresAt, &ti)
 	if err != nil {
 		t.Fatalf("query failed:%v", err)
 	}
@@ -465,10 +478,643 @@ VALUES(?,?)
 		t.Fatal("lease_expires_at invalid")
 	}
 	if !l.Time.Equal(leaseExpiresAt.Time) {
-    t.Fatal("lease expiry changed after duplicate claim")
-}	
+		t.Fatal("lease expiry changed after duplicate claim")
+	}
 	if ti < 25000000 || ti > 30000000 {
-    t.Fatal("lease duration invalid")
+		t.Fatal("lease duration invalid")
+	}
+
 }
-	
+
+func TestMarkSucceededWrongLeaseToken(t *testing.T) {
+	db := openTestDB(t)
+	result, err := db.Exec(`
+INSERT INTO tasks(task_type,payload)
+VALUES(?,?)
+`, "email", `{"to":"test@example.com"}`)
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	idd, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get last insert id failed:%v", err)
+	}
+	if idd <= 0 {
+		t.Fatalf("id <=0 ")
+	}
+	t.Cleanup(func() {
+		_, err := db.Exec(`
+	DELETE FROM tasks
+	WHERE id=?
+	`, idd)
+		if err != nil {
+			t.Fatalf("delete failed:%v", err)
+		}
+	})
+	ctx := context.Background()
+	id := uint64(idd)
+	token, started, err := TryStartTask(ctx, db, id)
+	if err != nil {
+		t.Fatalf("try start task failed:%v", err)
+	}
+	if !started {
+		t.Fatalf("try start task failed")
+	}
+	if token == "" {
+		t.Fatalf("token is empty")
+	}
+	ms, err := MarkSucceeded(ctx, db, id, "BBB")
+	if err != nil {
+		t.Fatalf("mark should failed:%v", err)
+	}
+	if ms {
+		t.Fatalf("mark should not succeed")
+	}
+	var status string
+	err = db.QueryRow(`
+	SELECT status
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&status)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if status != "running" {
+		t.Fatalf("expect status:running,got:%s", status)
+	}
+	ms, err = MarkSucceeded(ctx, db, id, token)
+	if err != nil {
+		t.Fatalf("mark failed:%v", err)
+	}
+	if !ms {
+		t.Fatalf("mark not succeed")
+	}
+	err = db.QueryRow(`
+	SELECT status
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&status)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if status != "succeeded" {
+		t.Fatalf("expect:succeeded,get:%s", status)
+	}
+}
+
+func TestTryStartTaskExpiredLease(t *testing.T) {
+	db := openTestDB(t)
+	result, err := db.Exec(`
+INSERT INTO tasks(task_type,payload)
+VALUES(?,?)
+`, "email", `{"to":"test@example.com"}`)
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	idd, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get last insert id failed:%v", err)
+	}
+	if idd <= 0 {
+		t.Fatalf("id <=0 ")
+	}
+	t.Cleanup(func() {
+		_, err := db.Exec(`
+	DELETE FROM tasks
+	WHERE id=?
+	`, idd)
+		if err != nil {
+			t.Fatalf("delete failed:%v", err)
+		}
+	})
+	ctx := context.Background()
+	id := uint64(idd)
+	tokenA, started, err := TryStartTask(ctx, db, id)
+	if err != nil {
+		t.Fatalf("try start failed:%v", err)
+	}
+	if !started {
+		t.Fatalf("started failed")
+	}
+	if tokenA == "" {
+		t.Fatalf("tokenA is empty")
+	}
+	_, err = db.Exec(`
+	UPDATE tasks
+SET lease_expires_at = NOW(6) - INTERVAL 1 SECOND
+WHERE id = ?;
+	`, idd)
+	if err != nil {
+		t.Fatalf("update lease_expires failed:%v", err)
+	}
+	tokenB, started, err := TryStartTask(ctx, db, id)
+	if err != nil {
+		t.Fatalf("try start failed:%v", err)
+	}
+	if !started {
+		t.Fatalf("started failed")
+	}
+	if tokenB == "" {
+		t.Fatalf("tokenB is empty")
+	}
+	if tokenB == tokenA {
+		t.Fatalf("tokenB=tokenA")
+	}
+	var lt string
+	err = db.QueryRow(`
+	SELECT lease_token
+	FROM tasks
+	WHERE id = ?;
+	`, id).Scan(&lt)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if lt != tokenB {
+		t.Fatalf("lease_token!=tokenB")
+	}
+	ms, err := MarkSucceeded(ctx, db, id, tokenA)
+	if err != nil {
+		t.Fatalf("mark succeeded error:%v", err)
+	}
+	if ms {
+		t.Fatalf("ms should not succeeded")
+	}
+	var status string
+	err = db.QueryRow(`
+	SELECT status
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&status)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if status != "running" {
+		t.Fatalf("expect :running,get:%s", status)
+	}
+	ms, err = MarkSucceeded(ctx, db, id, tokenB)
+	if err != nil {
+		t.Fatalf("mark succeeded error:%v", err)
+	}
+	if !ms {
+		t.Fatalf("ms should succeeded")
+	}
+	err = db.QueryRow(`
+	SELECT status
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&status)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if status != "succeeded" {
+		t.Fatalf("expect :succeeded,get:%s", status)
+	}
+}
+
+func TestTryStartTaskExpiredLeaseConcurrent(t *testing.T) {
+	db := openTestDB(t)
+	result, err := db.Exec(`
+	INSERT INTO tasks(task_type,payload,lease_expires_at,status)
+	VALUES(?,?,NOW(6)-INTERVAL 1 SECOND,?)
+	`, "email", `{"to":"test@example.com"}`, "running")
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	idd, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get lastinsertid failed:%v", err)
+	}
+	if idd <= 0 {
+		t.Fatalf("idd<=0")
+	}
+	t.Cleanup(
+		func() {
+			_, err := db.Exec(`
+			DELETE FROM tasks
+			WHERE id=?
+			`, idd)
+			if err != nil {
+				t.Fatalf("delete failed:%v", err)
+			}
+		})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	start := make(chan struct{})
+	ctx := context.Background()
+	id := uint64(idd)
+	var tokenA string
+	var tokenB string
+	var startedA bool
+	var startedB bool
+	var errA error
+	var errB error
+	ready := make(chan struct{}, 2)
+	go func() {
+		defer wg.Done()
+		ready <- struct{}{}
+		<-start
+		tokenA, startedA, errA = TryStartTask(ctx, db, id)
+
+	}()
+
+	go func() {
+		defer wg.Done()
+		ready <- struct{}{}
+		<-start
+		tokenB, startedB, errB = TryStartTask(ctx, db, id)
+
+	}()
+	<-ready
+	<-ready
+	close(start)
+	wg.Wait()
+	if errA != nil {
+		t.Fatalf("start task failed:%v", errA)
+	}
+	if errB != nil {
+		t.Fatalf("start task failed:%v", errB)
+	}
+	if startedA {
+		if startedB {
+			t.Fatalf("should not be two true")
+		}
+	} else {
+		if !startedB {
+			t.Fatalf("should not be two false")
+		}
+	}
+	var token string
+	if tokenA == "" && tokenB == "" {
+		t.Fatalf("tokenA and tokenB are both empty")
+	}
+	if tokenA != "" && tokenB != "" {
+		t.Fatalf("tokenA and tokenB are both filled")
+	}
+	if tokenA != "" {
+		token = tokenA
+	} else {
+		token = tokenB
+	}
+	var leaseToken string
+	var status string
+	err = db.QueryRow(`
+	SELECT lease_token ,status
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&leaseToken, &status)
+	if err != nil {
+		t.Fatalf("query failed :%v", err)
+	}
+	if leaseToken != token {
+		t.Fatalf("leaseToken!=token")
+	}
+	if status != "running" {
+		t.Fatalf("expect status:running,get:%s", status)
+	}
+}
+func TestRenewLeaseSuccess(t *testing.T) {
+	db := openTestDB(t)
+	result, err := db.Exec(`
+	INSERT INTO tasks(task_type,payload)
+	VALUES(?,?)
+	`, "email", `{"to":"test@example.com"}`)
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	idd, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get last insert id failed:%v", err)
+	}
+	if idd <= 0 {
+		t.Fatalf("idd<=0")
+	}
+	t.Cleanup(func() {
+		_, err := db.Exec(`
+		DELETE FROM tasks
+		WHERE id=?
+		`, idd)
+		if err != nil {
+			t.Fatalf("delete failed:%v", err)
+		}
+	})
+	id := uint64(idd)
+	ctx := context.Background()
+	leaseToken, started, err := TryStartTask(ctx, db, id)
+	if err != nil {
+		t.Fatalf("try start task failed:%v", err)
+	}
+	if !started {
+		t.Fatalf("start task failed")
+	}
+	if leaseToken == "" {
+		t.Fatalf("leaseToken is empty")
+	}
+	var oldtime sql.NullTime
+	err = db.QueryRow(`
+	SELECT lease_expires_at
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&oldtime)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if !oldtime.Valid {
+		t.Fatalf("old time invalid")
+	}
+	renew, err := RenewLease(ctx, db, id, leaseToken)
+	if err != nil {
+		t.Fatalf("renewlease failed:%v", err)
+	}
+	if !renew {
+		t.Fatalf("renew lease failed")
+	}
+	var newtime sql.NullTime
+	err = db.QueryRow(`
+	SELECT lease_expires_at
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&newtime)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if !newtime.Valid {
+		t.Fatalf("new time invalid")
+	}
+	if !newtime.Time.After(oldtime.Time) {
+		t.Fatalf(
+			"lease was not extended: old=%v, new=%v",
+			oldtime.Time,
+			newtime.Time,
+		)
+	}
+}
+func TestRenewLeaseWrongToken(t *testing.T) {
+	db := openTestDB(t)
+	result, err := db.Exec(`
+	INSERT INTO tasks(task_type,payload)
+	VALUES(?,?)
+	`, "email", `{"to":"test@example.com"}`)
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	idd, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get last insert id failed:%v", err)
+	}
+	if idd <= 0 {
+		t.Fatalf("idd<=0")
+	}
+	t.Cleanup(func() {
+		_, err := db.Exec(`
+		DELETE FROM tasks
+		WHERE id=?
+		`, idd)
+		if err != nil {
+			t.Fatalf("delete failed:%v", err)
+		}
+	})
+	id := uint64(idd)
+	ctx := context.Background()
+	TokenA, started, err := TryStartTask(ctx, db, id)
+	if err != nil {
+		t.Fatalf("try start task failed:%v", err)
+	}
+	if !started {
+		t.Fatalf("start task failed")
+	}
+	if TokenA == "" {
+		t.Fatalf("TokenA is empty")
+	}
+	var oldtime sql.NullTime
+	err = db.QueryRow(`
+	SELECT lease_expires_at
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&oldtime)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if !oldtime.Valid {
+		t.Fatalf("old time invalid")
+	}
+	renew, err := RenewLease(ctx, db, id, "AAA")
+	if err != nil {
+		t.Fatalf("renewlease failed:%v", err)
+	}
+	if renew {
+		t.Fatalf("renew should not succeeded")
+	}
+	var newtime sql.NullTime
+	err = db.QueryRow(`
+	SELECT lease_expires_at
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&newtime)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if !newtime.Valid {
+		t.Fatalf("new time invalid")
+	}
+	if !oldtime.Time.Equal(newtime.Time) {
+		t.Fatalf("lease_time_at changed")
+	}
+	var token string
+	err = db.QueryRow(`
+	SELECT lease_token
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&token)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if token != TokenA {
+		t.Fatalf("token != tokenA")
+	}
+}
+func TestRenewLeaseExpired(t *testing.T) {
+	db := openTestDB(t)
+	result, err := db.Exec(`
+	INSERT INTO tasks(task_type,payload)
+	VALUES(?,?)
+	`, "email", `{"to":"test@example.com"}`)
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	idd, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get last insert id failed:%v", err)
+	}
+	if idd <= 0 {
+		t.Fatalf("idd <=0")
+	}
+	t.Cleanup(func() {
+		_, err := db.Exec(`
+		DELETE FROM tasks
+		WHERE id=?
+		`, idd)
+		if err != nil {
+			t.Fatalf("delete failed:%v", err)
+		}
+	})
+	id := uint64(idd)
+	ctx := context.Background()
+	tokenA, started, err := TryStartTask(ctx, db, id)
+	if err != nil {
+		t.Fatalf("try start task failed:%v", err)
+	}
+	if !started {
+		t.Fatalf("try start task failed")
+	}
+	if tokenA == "" {
+		t.Fatalf("tokenA is empty")
+	}
+	result, err = db.Exec(`
+	UPDATE tasks
+	SET lease_expires_at=Now(6)- INTERVAL 1 SECOND
+	WHERE id=?
+	`, id)
+	if err != nil {
+		t.Fatalf("update lease_expires_at failed:%v", err)
+	}
+	ra, err := result.RowsAffected()
+	if err != nil {
+		t.Fatalf("get rows affect failed:%v", err)
+	}
+	if ra != 1 {
+		t.Fatalf("rowsaffect != 1")
+	}
+	var tr bool
+	err = db.QueryRow(`
+		SELECT lease_expires_at <= NOW(6)
+		FROM tasks
+		WHERE id=?
+	`, id).Scan(&tr)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if !tr {
+		t.Fatalf("lease_expires_at > now")
+	}
+	var oldTime sql.NullTime
+	err = db.QueryRow(`
+	SELECT lease_expires_at
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&oldTime)
+	if err != nil {
+		t.Fatalf("qeury failed:%v", err)
+	}
+	if !oldTime.Valid {
+		t.Fatalf("old time invalid")
+	}
+
+	renew, err := RenewLease(ctx, db, id, tokenA)
+	if err != nil {
+		t.Fatalf("renewlease failed:%v", err)
+	}
+	if renew {
+		t.Fatalf("renew should not be succeeded")
+	}
+	var newTime sql.NullTime
+	err = db.QueryRow(`
+	SELECT lease_expires_at
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&newTime)
+	if err != nil {
+		t.Fatalf("qeury failed:%v", err)
+	}
+	if !newTime.Valid {
+		t.Fatalf("newtime invalid")
+	}
+	if !newTime.Time.Equal(oldTime.Time) {
+		t.Fatalf("renewlease succeed")
+	}
+}
+func TestRenewLeaseAfterSucceeded(t *testing.T) {
+	db := openTestDB(t)
+	result, err := db.Exec(`
+	INSERT INTO tasks(task_type,payload)
+	VALUES(?,?)
+	`, "email", `{"to":"test@example.com"}`)
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	idd, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get last insert id failed:%v", err)
+	}
+	if idd <= 0 {
+		t.Fatalf("id<=0")
+	}
+	t.Cleanup(func() {
+		_, err := db.Exec(`
+		DELETE FROM tasks
+		WHERE id=?
+		`, idd)
+		if err != nil {
+			t.Fatalf("delete failed:%v", err)
+		}
+	})
+	ctx := context.Background()
+	id := uint64(idd)
+	tokenA, started, err := TryStartTask(ctx, db, id)
+	if err != nil {
+		t.Fatalf("try start task failed:%v", err)
+	}
+	if !started {
+		t.Fatalf("start failed")
+	}
+	if tokenA == "" {
+		t.Fatalf("tokenA is empty")
+	}
+	ms, err := MarkSucceeded(ctx, db, id, tokenA)
+	if err != nil {
+		t.Fatalf("marksucceeded failed:%v", err)
+	}
+	if !ms {
+		t.Fatalf("mark succeeded failed")
+	}
+	var status string
+	var oldTime sql.NullTime
+	err = db.QueryRow(`
+	SELECT status , lease_expires_at
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&status, &oldTime)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if status != "succeeded" {
+		t.Fatalf("expect:succeeded,get:%s", status)
+	}
+	if !oldTime.Valid {
+		t.Fatalf("invalid old time")
+	}
+	renew, err := RenewLease(ctx, db, id, tokenA)
+	if err != nil {
+		t.Fatalf("renewlease error:%v", err)
+	}
+	if renew {
+		t.Fatalf("renewlease should not be succeeded")
+	}
+	var newTime sql.NullTime
+	err = db.QueryRow(`
+	SELECT status , lease_expires_at
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&status, &newTime)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if status != "succeeded" {
+		t.Fatalf("expect:succeeded,get:%s", status)
+	}
+	if !newTime.Valid {
+		t.Fatalf("invalid new time")
+	}
+	if !oldTime.Time.Equal(newTime.Time) {
+		t.Fatalf("oldtime!=newtime")
+	}
 }

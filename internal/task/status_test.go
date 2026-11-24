@@ -65,14 +65,17 @@ func TestMarkSucceeded(t *testing.T) {
 	})
 
 	id := uint64(idd)
-	tr, err := TryStartTask(ctx, db, id)
+	token, tr, err := TryStartTask(ctx, db, id)
 	if err != nil {
 		t.Fatalf("trystarttask failed:%v", err)
 	}
 	if !tr {
 		t.Fatalf("trystarttask,false")
 	}
-	tr, err = MarkSucceeded(ctx, db, id)
+	if token == "" {
+		t.Fatalf("token is empty")
+	}
+	tr, err = MarkSucceeded(ctx, db, id, token)
 	if err != nil {
 		t.Fatalf("mark succeeded failed:%v", err)
 	}
@@ -123,7 +126,7 @@ func TestMarkSucceededFromPending(t *testing.T) {
 		}
 	})
 	id := uint64(idd)
-	updated, err := MarkSucceeded(ctx, db, id)
+	updated, err := MarkSucceeded(ctx, db, id, "")
 	if err != nil {
 		t.Fatalf("marksucceeded failed:%v", err)
 	}
@@ -174,14 +177,17 @@ func TestMarkSucceededTwice(t *testing.T) {
 		}
 	})
 	id := uint64(idd)
-	started, err := TryStartTask(ctx, db, id)
+	token, started, err := TryStartTask(ctx, db, id)
 	if err != nil {
 		t.Fatalf("try start task failed:%v", err)
 	}
 	if !started {
 		t.Fatalf("started false")
 	}
-	updated, err := MarkSucceeded(ctx, db, id)
+	if token == "" {
+		t.Fatalf("token is empty")
+	}
+	updated, err := MarkSucceeded(ctx, db, id, token)
 	if err != nil {
 		t.Fatalf("marksucceed failed:%v", err)
 	}
@@ -198,7 +204,7 @@ func TestMarkSucceededTwice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query failed:%v", err)
 	}
-	started, err = MarkSucceeded(ctx, db, id)
+	started, err = MarkSucceeded(ctx, db, id, token)
 	if err != nil {
 		t.Fatalf("starttask failed:%v", err)
 	}
@@ -254,12 +260,15 @@ func TestMarkFailed(t *testing.T) {
 		}
 	})
 	id := uint64(idd)
-	ts, err := TryStartTask(ctx, db, id)
+	token, ts, err := TryStartTask(ctx, db, id)
 	if err != nil {
 		t.Fatalf("try start task failed:%v", err)
 	}
 	if !ts {
 		t.Fatalf("try start task failed")
+	}
+	if token == "" {
+		t.Fatalf("token is empty")
 	}
 	var status string
 	err = db.QueryRowContext(ctx, `
@@ -273,7 +282,7 @@ func TestMarkFailed(t *testing.T) {
 	if status != "running" {
 		t.Fatalf("expect:running,get:%s", status)
 	}
-	mf, err := MarkFailed(ctx, db, id, "simulated execution failure")
+	mf, err := MarkFailed(ctx, db, id, "simulated execution failure", token)
 	if err != nil {
 		t.Fatalf("markfailed failed:%v", err)
 	}
@@ -327,14 +336,17 @@ func TestMarkFailedAfterSucceeded(t *testing.T) {
 		}
 	})
 	id := uint64(idd)
-	ts, err := TryStartTask(ctx, db, id)
+	token, ts, err := TryStartTask(ctx, db, id)
 	if err != nil {
 		t.Fatalf("try start task failed:%v", err)
 	}
 	if !ts {
 		t.Fatalf("try start task failed")
 	}
-	ms, err := MarkSucceeded(ctx, db, id)
+	if token == "" {
+		t.Fatalf("token is empty")
+	}
+	ms, err := MarkSucceeded(ctx, db, id, token)
 	if err != nil {
 		t.Fatalf("marksuccess failed:%v", err)
 	}
@@ -362,7 +374,7 @@ func TestMarkFailedAfterSucceeded(t *testing.T) {
 		t.Fatalf("finishedAt invalid")
 	}
 
-	mf, err := MarkFailed(ctx, db, id, "unexpected failure")
+	mf, err := MarkFailed(ctx, db, id, "unexpected failure", token)
 	if err != nil {
 		t.Fatalf("markFailed failed:%v", err)
 	}

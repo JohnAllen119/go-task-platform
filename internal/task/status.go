@@ -10,12 +10,13 @@ func MarkSucceeded(
 	ctx context.Context,
 	db *sql.DB,
 	id uint64,
+	leaseToken string,
 ) (bool, error) {
 	result, err := db.ExecContext(ctx, `
 	UPDATE tasks
 	SET status=?,finished_at=NOW()
-	WHERE id=? AND status='running'
-	`, "succeeded", id)
+	WHERE id=? AND status='running' AND lease_token=? AND lease_expires_at>NOW(6)
+	`, "succeeded", id, leaseToken)
 	if err != nil {
 		return false, err
 	}
@@ -36,12 +37,13 @@ func MarkFailed(
 	db *sql.DB,
 	id uint64,
 	reason string,
+	leaseToken string,
 ) (bool, error) {
 	result, err := db.ExecContext(ctx, `
 	UPDATE tasks
 	SET status=?,last_error=?,finished_at=NOW()
-	WHERE id=? AND status='running'
-	`, "failed", reason, id)
+	WHERE id=? AND status='running' AND lease_token=? AND lease_expires_at>NOW(6)
+	`, "failed", reason, id, leaseToken)
 	if err != nil {
 		return false, err
 	}

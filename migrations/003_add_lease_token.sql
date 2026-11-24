@@ -1,0 +1,1 @@
+ALTER TABLE tasks ADD COLUMN lease_token VARCHAR(64) NULL;

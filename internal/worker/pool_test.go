@@ -190,20 +190,19 @@ func TestRunPoolCancelWhileSending(t *testing.T) {
 	}
 
 	cancel()
-	timeout:=time.After(time.Second)
-	for{
-	select {
-	case _, ok := <-results:
-		if !ok {
-			return
+	timeout := time.After(time.Second)
+	for {
+		select {
+		case _, ok := <-results:
+			if !ok {
+				return
+			}
+		case <-timeout:
+			t.Fatal("worker pool did not stop")
+
 		}
-	case <-timeout:
-		t.Fatal("worker pool did not stop")
 
 	}
-	
-
-}
 }
 func TestRunPoolExecuteSuccess(t *testing.T) {
 
@@ -318,8 +317,8 @@ func TestRunPoolExecuteFailure(t *testing.T) {
 			t.Fatalf("start failed")
 		}
 		if r.Err == nil {
-    t.Fatal("expected execution error, got nil")
-}
+			t.Fatal("expected execution error, got nil")
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("worker timeout")
 	}

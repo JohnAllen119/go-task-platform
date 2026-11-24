@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/JohnAllen119/go-task-platform/internal/task"
 	"sync"
+	"time"
 )
 
 type Result struct {
@@ -30,16 +31,36 @@ func runWorker(
 				return
 			}
 			var result Result
-			res, err := task.TryStartTask(ctx, db, id)
+			token, res, err := task.TryStartTask(ctx, db, id)
+
 			if err == nil && res {
+
 				t, founderr := task.FindByID(ctx, db, id)
 				if founderr != nil {
 					err = founderr
 				} else {
-					execErr := Execute(ctx, t.TaskType, t.Payload)
-					if execErr != nil {
+					execCtx, cancelExec := context.WithCancel(ctx)
+					heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+					heartbeatDone := make(chan error, 1)
+					go func() {
+						heartbeatDone <- runHeartbeat(
+							heartbeatCtx,
+							db,
+							id,
+							token,
+							10*time.Second,
+							cancelExec,
+						)
+					}()
+					execErr := Execute(execCtx, t.TaskType, t.Payload)
+					stopHeartbeat()
+					heartbeatErr := <-heartbeatDone
+					cancelExec()
+					if heartbeatErr != nil {
+						err = errors.Join(execErr, heartbeatErr)
+					} else if execErr != nil {
 						err = execErr
-						updated, markErr := task.MarkFailed(ctx, db, id, execErr.Error())
+						updated, markErr := task.MarkFailed(ctx, db, id, execErr.Error(), token)
 						if markErr != nil {
 							err = errors.Join(execErr, markErr)
 						} else if !updated {
@@ -50,7 +71,7 @@ func runWorker(
 						}
 
 					} else {
-						updated, markErr := task.MarkSucceeded(ctx, db, id)
+						updated, markErr := task.MarkSucceeded(ctx, db, id, token)
 
 						if markErr != nil {
 							err = fmt.Errorf("mark succeeded failed: %w", markErr)
