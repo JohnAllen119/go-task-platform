@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/JohnAllen119/go-task-platform/internal/task"
 	"time"
 )
 
@@ -16,13 +15,14 @@ func runHeartbeat(
 	token string,
 	interval time.Duration,
 	cancelExec context.CancelFunc,
+	renewFunc func(context.Context, *sql.DB, uint64, string) (bool, error),
 ) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			renew, err := task.RenewLease(ctx, db, id, token)
+			renew, err := renewFunc(ctx, db, id, token)
 			if err != nil {
 				if errors.Is(err, context.Canceled) && ctx.Err() != nil {
 					return nil

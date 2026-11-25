@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"github.com/JohnAllen119/go-task-platform/internal/task"
 	_ "github.com/go-sql-driver/mysql"
 	"testing"
@@ -87,7 +88,7 @@ func TestRunHeartbeatRenewsLease(t *testing.T) {
 	})
 	interval := 20 * time.Millisecond
 	go func() {
-		heartbeatDone <- runHeartbeat(heartbeatCtx, db, id, tokenA, interval, cancelExec)
+		heartbeatDone <- runHeartbeat(heartbeatCtx, db, id, tokenA, interval, cancelExec, task.RenewLease)
 	}()
 
 	pollTicker := time.NewTicker(10 * time.Millisecond)
@@ -171,7 +172,7 @@ func TestRunHeartbeatLeaseLost(t *testing.T) {
 	})
 	interval := 20 * time.Millisecond
 	go func() {
-		heartbeatDone <- runHeartbeat(heartbeatCtx, db, id, tokenA, interval, cancelExec)
+		heartbeatDone <- runHeartbeat(heartbeatCtx, db, id, tokenA, interval, cancelExec, task.RenewLease)
 	}()
 
 	result, err = db.Exec(`
@@ -238,7 +239,7 @@ func TestRunHeartbeatNormalStop(t *testing.T) {
 	heartbeatDone := make(chan error, 1)
 	t.Cleanup(cancelExec)
 	go func() {
-		heartbeatDone <- runHeartbeat(heartbeatCtx, db, id, tokenA, 20*time.Millisecond, cancelExec)
+		heartbeatDone <- runHeartbeat(heartbeatCtx, db, id, tokenA, 20*time.Millisecond, cancelExec, task.RenewLease)
 	}()
 	stopHeartbeat()
 	heartbeatErr := <-heartbeatDone
@@ -247,5 +248,105 @@ func TestRunHeartbeatNormalStop(t *testing.T) {
 	}
 	if execCtx.Err() != nil {
 		t.Fatalf("execCtx was unexpectedly canceled: %v", execCtx.Err())
+	}
+}
+
+func TestRunHeartbeatCancelDuringRenewal(t *testing.T) {
+	started := make(chan struct{})
+	fake := func(ctx context.Context,
+		db *sql.DB,
+		id uint64,
+		leaseToken string) (bool, error) {
+		close(started)
+		<-ctx.Done()
+		return false, context.Canceled
+	}
+	heartbeatDone := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	execCtx, cancelExec := context.WithCancel(context.Background())
+	defer cancel()
+	defer cancelExec()
+	go func() {
+		heartbeatDone <- runHeartbeat(ctx, nil, 0, "", 10*time.Millisecond, cancelExec, fake)
+	}()
+	select {
+	case <-started:
+		break
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout")
+	}
+
+	cancel()
+	select {
+	case heartbeatErr := <-heartbeatDone:
+		if heartbeatErr != nil {
+			t.Fatalf("runhertbeat failed:%v", heartbeatErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout")
+	}
+
+	if execCtx.Err() != nil {
+		t.Fatalf("execCtx Err :=%v", execCtx.Err())
+	}
+}
+func TestRunHeartbeatRenewError(t *testing.T) {
+	wantErr := errors.New("mysql connection error")
+	fake := func(ctx context.Context,
+		db *sql.DB,
+		id uint64,
+		leaseToken string) (bool, error) {
+
+		return false, wantErr
+	}
+	heartbeatDone := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	execCtx, cancelExec := context.WithCancel(context.Background())
+	defer cancel()
+	defer cancelExec()
+	go func() {
+		heartbeatDone <- runHeartbeat(ctx, nil, 0, "", 10*time.Millisecond, cancelExec, fake)
+	}()
+	select {
+	case heartbeatErr := <-heartbeatDone:
+		if !errors.Is(heartbeatErr, wantErr) {
+			t.Fatalf("expect wantErr")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("time out")
+	}
+	if execCtx.Err() != context.Canceled {
+		t.Fatalf("unexpected execCtx error: %v", execCtx.Err())
+	}
+}
+func TestRunHeartbeatRenewRejected(t *testing.T) {
+
+	fake := func(ctx context.Context,
+		db *sql.DB,
+		id uint64,
+		leaseToken string) (bool, error) {
+		return false, nil
+	}
+	heartbeatDone := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	execCtx, cancelExec := context.WithCancel(context.Background())
+	defer cancel()
+	defer cancelExec()
+	go func() {
+		heartbeatDone <- runHeartbeat(ctx, nil, 0, "", 10*time.Millisecond, cancelExec, fake)
+	}()
+	select {
+	case heartbeatErr := <-heartbeatDone:
+		if heartbeatErr == nil {
+			t.Fatal("expected renewal rejection error")
+		}
+		if heartbeatErr.Error() != "lease renewal rejected for task 0" {
+			t.Fatalf("unexpected error: %v", heartbeatErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("time out")
+	}
+	if execCtx.Err() != context.Canceled {
+		t.Fatalf("unexpected execCtx error: %v", execCtx.Err())
 	}
 }

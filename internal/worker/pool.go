@@ -50,6 +50,7 @@ func runWorker(
 							token,
 							10*time.Second,
 							cancelExec,
+							task.RenewLease,
 						)
 					}()
 					execErr := Execute(execCtx, t.TaskType, t.Payload)
