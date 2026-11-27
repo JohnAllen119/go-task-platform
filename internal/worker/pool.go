@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/JohnAllen119/go-task-platform/internal/task"
@@ -21,6 +22,9 @@ func runWorker(
 	db *sql.DB,
 	ids <-chan uint64,
 	results chan<- Result,
+	execFunc func(context.Context, string, json.RawMessage) error,
+	renewFunc func(context.Context, *sql.DB, uint64, string) (bool, error),
+	interval time.Duration,
 ) {
 	for {
 		select {
@@ -48,12 +52,12 @@ func runWorker(
 							db,
 							id,
 							token,
-							10*time.Second,
+							interval,
 							cancelExec,
-							task.RenewLease,
+							renewFunc,
 						)
 					}()
-					execErr := Execute(execCtx, t.TaskType, t.Payload)
+					execErr := execFunc(execCtx, t.TaskType, t.Payload)
 					stopHeartbeat()
 					heartbeatErr := <-heartbeatDone
 					cancelExec()
@@ -111,7 +115,7 @@ func RunPool(
 	for i := 0; i < workerCount; i++ {
 		go func() {
 			defer wg.Done()
-			runWorker(ctx, db, ids, results)
+			runWorker(ctx, db, ids, results, Execute, task.RenewLease, 10*time.Second)
 		}()
 
 	}

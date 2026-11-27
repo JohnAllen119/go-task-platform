@@ -3,7 +3,8 @@ package worker
 import (
 	"context"
 	"database/sql"
-
+	"encoding/json"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -342,4 +343,108 @@ func TestRunPoolExecuteFailure(t *testing.T) {
 	if !lastError.Valid || lastError.String == "" {
 		t.Fatal("last_error is null or empty")
 	}
+}
+
+func TestRunWorkerHeartbeatFailureCancelsExecution(t *testing.T) {
+	db := openWorkerTestDB(t)
+	result, err := db.Exec(`
+	INSERT INTO tasks(task_type,payload)
+	VALUES(?,?)
+	`, "email", `{"to":"example@test.com"}`)
+	if err != nil {
+		t.Fatalf("insert failed:%v", err)
+	}
+	idd, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get last insert id failed:%v", err)
+	}
+	if idd <= 0 {
+		t.Fatalf("id<=0")
+	}
+	t.Cleanup(func() {
+		_, err := db.Exec(`
+		DELETE FROM tasks
+		WHERE id=?
+		`, idd)
+		if err != nil {
+			t.Fatalf("delete failed:%v", err)
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	start := make(chan struct{})
+	id := uint64(idd)
+	wantErr := errors.New("renewLease failed")
+	fakeExec := func(ctx context.Context, taskType string, payload json.RawMessage) error {
+		close(start)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	fakeRene := func(ctx context.Context, db *sql.DB, id uint64, token string) (bool, error) {
+		select {
+		case <-start:
+			return false, wantErr
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(20 * time.Second):
+			return false, errors.New("renewlease timeout")
+		}
+	}
+	results := make(chan Result, 1)
+	ids := make(chan uint64, 1)
+	ids <- id
+	close(ids)
+	interval := 10 * time.Millisecond
+	exit := make(chan struct{})
+	go func() {
+		runWorker(ctx, db, ids, results, fakeExec, fakeRene, interval)
+		close(exit)
+	}()
+	var res Result
+	received := false
+	select {
+	case res = <-results:
+		received = true
+		cancel()
+
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Errorf("get results timeout")
+	}
+
+	select {
+	case <-exit:
+		break
+	case <-time.After(2 * time.Second):
+		t.Fatalf("runworker timeout")
+	}
+	if !received {
+		return
+	}
+	err = res.Err
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("missing execution cancellation:%v", err)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("missing renewal error: %v", err)
+	}
+	if res.TaskID != id {
+		t.Fatalf("expect id:%d,get:%d", id, res.TaskID)
+	}
+	if !res.Started {
+		t.Fatalf("started failed")
+	}
+	var status string
+	err = db.QueryRow(`
+	SELECT status
+	FROM tasks
+	WHERE id=?
+	`, id).Scan(&status)
+	if err != nil {
+		t.Fatalf("query failed:%v", err)
+	}
+	if status != "running" {
+		t.Fatalf("expect status:running,get:%s", status)
+	}
+
 }
